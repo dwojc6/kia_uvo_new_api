@@ -107,8 +107,24 @@ class HyundaiKiaConnectDataUpdateCoordinator(DataUpdateCoordinator):
         """
         try:
             await self.async_check_and_refresh_token()
-        except AuthenticationError as AuthError:
-            raise ConfigEntryAuthFailed(AuthError) from AuthError
+        except AuthenticationError as auth_error:
+            _LOGGER.error(f"Authentication failed: {auth_error}")
+            raise ConfigEntryAuthFailed(
+                "Login failed into Hyundai (Bluelink) / Kia (Uvo) Connect servers. "
+                "Please use the official app to logout and log back in, then try again."
+            ) from auth_error
+        except Exception as err:
+            # Catch generic exceptions that might be authentication-related
+            error_msg = str(err).lower()
+            if any(keyword in error_msg for keyword in ['otp', 'authentication', 'login', 'invalid request', '9789']):
+                _LOGGER.error(f"Authentication-related error during token refresh: {err}")
+                raise ConfigEntryAuthFailed(
+                    "Login failed into Hyundai (Bluelink) / Kia (Uvo) Connect servers. "
+                    "Please re-authenticate through the integration settings."
+                ) from err
+            # Re-raise other exceptions
+            raise
+        
         current_hour = dt_util.now().hour
 
         if (
@@ -168,9 +184,22 @@ class HyundaiKiaConnectDataUpdateCoordinator(DataUpdateCoordinator):
 
     async def async_check_and_refresh_token(self):
         """Refresh token if needed via library."""
-        await self.hass.async_add_executor_job(
-            self.vehicle_manager.check_and_refresh_token
-        )
+        try:
+            await self.hass.async_add_executor_job(
+                self.vehicle_manager.check_and_refresh_token
+            )
+        except AuthenticationError:
+            # Re-raise AuthenticationError as-is
+            raise
+        except Exception as err:
+            # Check if this is an authentication-related exception
+            error_msg = str(err).lower()
+            if any(keyword in error_msg for keyword in ['otp', 'authentication', 'login', 'invalid request', '9789', 'session id']):
+                _LOGGER.error(f"Token refresh failed with authentication error: {err}")
+                # Convert to AuthenticationError so it triggers reauth flow
+                raise AuthenticationError(f"Token refresh failed: {err}") from err
+            # Re-raise other exceptions
+            raise
 
     async def async_await_action_and_refresh(self, vehicle_id, action_id):
         try:
