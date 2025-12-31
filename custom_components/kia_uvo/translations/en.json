@@ -13,7 +13,7 @@
       },
       "credentials_token": {
         "title": "Hyundai / Kia Connect - Credentials",
-        "description": "Enter your account credentials. Europe requires special token work — refer to the README and https://github.com/Hyundai-Kia-Connect/hyundai_kia_connect_api/wiki/Kia-Europe-Login-Flow",
+        "description": "Enter your account credentials. Europe requires special token work – refer to the README and https://github.com/Hyundai-Kia-Connect/hyundai_kia_connect_api/wiki/Kia-Europe-Login-Flow",
         "data": {
           "username": "Username",
           "password": "Token",
@@ -28,18 +28,43 @@
           "brand": "Brand"
         }
       },
+      "otp_destination": {
+        "title": "Two-Factor Authentication",
+        "description": "Select where you would like to receive your one-time password (OTP). The code will be valid for a few minutes.",
+        "data": {
+          "notify_type": "Send verification code to"
+        },
+        "data_description": {
+          "notify_type": "Choose the destination where you want to receive your verification code"
+        }
+      },
+      "otp_code": {
+        "title": "Enter Verification Code",
+        "description": "A verification code has been sent via {method} to {destination}. Please enter the code below.",
+        "data": {
+          "otp_code": "Verification Code"
+        },
+        "data_description": {
+          "otp_code": "Enter the 6-digit code from your {method}"
+        }
+      },
       "reauth_confirm": {
         "title": "Hyundai / Kia Connect - Reauthentication",
         "description": "Your account is unable to authenticate. Click Submit to re-setup."
       }
     },
     "abort": {
-      "already_configured": "Device is already configured"
+      "already_configured": "Device is already configured",
+      "reauth_successful": "Re-authentication successful!"
     },
     "error": {
       "invalid_auth": "Login failed into Hyundai (Bluelink) / Kia (Uvo) Connect servers. Please use the official app to logout and log back in, then try again.",
       "invalid_credentials": "Invalid username or token/password",
-      "unknown": "Unexpected error"
+      "unknown": "Unexpected error",
+      "otp_send_failed": "Failed to send verification code. Please try again.",
+      "invalid_otp": "Invalid verification code. Please check the code and try again.",
+      "empty_code": "Verification code cannot be empty.",
+      "no_otp_destination": "No valid destination available for OTP delivery."
     }
   },
   "options": {
