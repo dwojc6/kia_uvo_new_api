@@ -41,6 +41,7 @@ from .const import (
     DEFAULT_ENABLE_GEOLOCATION_ENTITY,
     DEFAULT_USE_EMAIL_WITH_GEOCODE_API,
     REGION_EUROPE,
+    REGION_USA,
     BRAND_HYUNDAI,
     BRAND_KIA,
 )
@@ -151,6 +152,9 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     def __init__(self):
         """Initialize the config flow."""
         self._region_data = None
+        self._credentials_data = None
+        self._api = None
+        self._otp_context = None
 
     @staticmethod
     @callback
@@ -168,7 +172,6 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             )
 
         self._region_data = user_input
-        self._region_data = user_input
         if REGIONS[self._region_data[CONF_REGION]] == REGION_EUROPE and (
             BRANDS[self._region_data[CONF_BRAND]] == BRAND_KIA
             or BRANDS[self._region_data[CONF_BRAND]] == BRAND_HYUNDAI
@@ -183,38 +186,187 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors = {}
 
         if user_input is not None:
-            # Combine region data with credentials
+            self._credentials_data = user_input
             full_config = {**self._region_data, **user_input}
 
-            try:
-                await validate_input(self.hass, full_config)
-            except InvalidAuth:
-                errors["base"] = "invalid_auth"
-            except Exception:  # pylint: disable=broad-except
-                _LOGGER.exception("Unexpected exception")
-                errors["base"] = "unknown"
+            # Check if this is USA region which requires OTP
+            region_name = REGIONS.get(self._region_data[CONF_REGION], "")
+            if region_name == REGION_USA:
+                try:
+                    self._api = VehicleManager.get_implementation_by_region_brand(
+                        self._region_data[CONF_REGION],
+                        self._region_data[CONF_BRAND],
+                        language=self.hass.config.language,
+                    )
+                    
+                    # Start login process
+                    token, otp_ctx = await self.hass.async_add_executor_job(
+                        self._api.start_login,
+                        user_input[CONF_USERNAME],
+                        user_input[CONF_PASSWORD],
+                        None,
+                    )
+                    
+                    if token:
+                        # No OTP required, login successful
+                        return await self._create_or_update_entry(full_config)
+                    elif otp_ctx:
+                        # OTP required
+                        self._otp_context = otp_ctx
+                        return await self.async_step_otp_destination()
+                    else:
+                        errors["base"] = "unknown"
+                        
+                except AuthenticationError:
+                    errors["base"] = "invalid_auth"
+                except Exception as err:
+                    _LOGGER.exception("Unexpected exception during login: %s", err)
+                    errors["base"] = "unknown"
             else:
-                if self.reauth_entry is None:
-                    title = f"{BRANDS[self._region_data[CONF_BRAND]]} {REGIONS[self._region_data[CONF_REGION]]} {user_input[CONF_USERNAME]}"
-                    await self.async_set_unique_id(
-                        hashlib.sha256(title.encode("utf-8")).hexdigest()
-                    )
-                    self._abort_if_unique_id_configured()
-                    return self.async_create_entry(title=title, data=full_config)
-                else:
-                    self.hass.config_entries.async_update_entry(
-                        self.reauth_entry, data=full_config
-                    )
-                    await self.hass.config_entries.async_reload(
-                        self.reauth_entry.entry_id
-                    )
-                    return self.async_abort(reason="reauth_successful")
+                # Non-USA regions use standard validation
+                try:
+                    await validate_input(self.hass, full_config)
+                    return await self._create_or_update_entry(full_config)
+                except InvalidAuth:
+                    errors["base"] = "invalid_auth"
+                except Exception:
+                    _LOGGER.exception("Unexpected exception")
+                    errors["base"] = "unknown"
 
         return self.async_show_form(
             step_id="credentials_password",
             data_schema=STEP_CREDENTIALS_DATA_SCHEMA,
             errors=errors,
         )
+
+    async def async_step_otp_destination(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Handle OTP destination selection."""
+        errors = {}
+        
+        if user_input is not None:
+            notify_type = user_input.get("notify_type", "EMAIL")
+            
+            try:
+                # Send OTP to selected destination
+                await self.hass.async_add_executor_job(
+                    self._api.send_otp,
+                    self._otp_context["otpKey"],
+                    notify_type,
+                    self._otp_context["xid"],
+                )
+                
+                self._otp_context["notify_type"] = notify_type
+                return await self.async_step_otp_code()
+                
+            except Exception as err:
+                _LOGGER.exception("Failed to send OTP: %s", err)
+                errors["base"] = "otp_send_failed"
+        
+        # Build schema based on available destinations
+        schema_dict = {}
+        choices = []
+        
+        if self._otp_context.get("hasEmail"):
+            choices.append("EMAIL")
+        if self._otp_context.get("hasPhone"):
+            choices.append("PHONE")
+        
+        if len(choices) > 1:
+            schema_dict[vol.Required("notify_type", default="EMAIL")] = vol.In(choices)
+            description = (
+                f"OTP can be sent to:\n"
+                f"Email: {self._otp_context.get('email', 'N/A')}\n"
+                f"Phone: {self._otp_context.get('phone', 'N/A')}"
+            )
+        elif len(choices) == 1:
+            schema_dict[vol.Required("notify_type", default=choices[0])] = vol.In(choices)
+            destination = self._otp_context.get('email') if choices[0] == "EMAIL" else self._otp_context.get('phone')
+            description = f"OTP will be sent to: {destination}"
+        else:
+            errors["base"] = "no_otp_destination"
+            description = "No OTP destination available"
+        
+        return self.async_show_form(
+            step_id="otp_destination",
+            data_schema=vol.Schema(schema_dict),
+            errors=errors,
+            description_placeholders={"info": description},
+        )
+
+    async def async_step_otp_code(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Handle OTP code input."""
+        errors = {}
+        
+        if user_input is not None:
+            otp_code = user_input.get("otp_code", "").strip()
+            
+            if not otp_code:
+                errors["otp_code"] = "empty_code"
+            else:
+                try:
+                    # Verify OTP and complete login
+                    token = await self.hass.async_add_executor_job(
+                        self._api.verify_otp_and_complete_login,
+                        self._credentials_data[CONF_USERNAME],
+                        self._credentials_data[CONF_PASSWORD],
+                        self._otp_context["otpKey"],
+                        self._otp_context["xid"],
+                        otp_code,
+                    )
+                    
+                    if token:
+                        full_config = {**self._region_data, **self._credentials_data}
+                        return await self._create_or_update_entry(full_config)
+                    else:
+                        errors["base"] = "invalid_otp"
+                        
+                except Exception as err:
+                    _LOGGER.exception("OTP verification failed: %s", err)
+                    errors["base"] = "invalid_otp"
+        
+        destination = (
+            self._otp_context.get('email') 
+            if self._otp_context.get('notify_type') == "EMAIL" 
+            else self._otp_context.get('phone')
+        )
+        
+        return self.async_show_form(
+            step_id="otp_code",
+            data_schema=vol.Schema({
+                vol.Required("otp_code"): str,
+            }),
+            errors=errors,
+            description_placeholders={
+                "destination": destination,
+                "method": self._otp_context.get('notify_type', 'EMAIL').lower(),
+            },
+        )
+
+    async def _create_or_update_entry(self, full_config: dict[str, Any]) -> FlowResult:
+        """Create new entry or update existing during reauth."""
+        if self.reauth_entry is None:
+            title = (
+                f"{BRANDS[self._region_data[CONF_BRAND]]} "
+                f"{REGIONS[self._region_data[CONF_REGION]]} "
+                f"{self._credentials_data[CONF_USERNAME]}"
+            )
+            await self.async_set_unique_id(
+                hashlib.sha256(title.encode("utf-8")).hexdigest()
+            )
+            self._abort_if_unique_id_configured()
+            return self.async_create_entry(title=title, data=full_config)
+        else:
+            self.hass.config_entries.async_update_entry(
+                self.reauth_entry, data=full_config
+            )
+            await self.hass.config_entries.async_reload(
+                self.reauth_entry.entry_id
+            )
+            return self.async_abort(reason="reauth_successful")
 
     async def async_step_credentials_token(
         self, user_input: dict[str, Any] | None = None
