@@ -105,7 +105,7 @@ def request_with_logging(func):
         ):
             _LOGGER.debug(f"{DOMAIN} - Error: session invalid")
             raise AuthError
-        _LOGGER.error(f"{DOMAIN} - Error: unknown error response {response.text}")
+        _LOGGER.debug(f"{DOMAIN} - Error: unknown error response {response.text}")
         raise RequestException
 
     return request_with_logging_wrapper
@@ -348,7 +348,7 @@ class KiaUvoApiUSA(ApiImpl):
         final_sid = self._complete_login_with_otp(username, password, sid, rmtoken)
         _LOGGER.debug(f"got final session id {final_sid}")
         _LOGGER.info(f"{DOMAIN} - Storing rmtoken for future logins")
-        _LOGGER.error(f"DEBUG - Created token with rmtoken: {rmtoken[:10]}... (length: {len(rmtoken)})")  # ADD THIS LINE
+        _LOGGER.debug(f"DEBUG - Created token with rmtoken: {rmtoken[:10]}... (length: {len(rmtoken)})")  # ADD THIS LINE
         valid_until = dt.datetime.now(dt.timezone.utc) + LOGIN_TOKEN_LIFETIME
         return Token(
             username=username,
@@ -368,10 +368,12 @@ class KiaUvoApiUSA(ApiImpl):
         pin: str | None = None,
     ) -> Token:
         """Login into cloud endpoints and return Token"""
+        _LOGGER.debug(f"{DOMAIN} - login() called")
         if token:
-            _LOGGER.error(f"DEBUG - login() called with token. Has refresh_token: {bool(token.refresh_token)}, Length: {len(token.refresh_token) if token.refresh_token else 0}")
-        else:
-            _LOGGER.error(f"DEBUG - login() called with NO token")
+            _LOGGER.debug(f"{DOMAIN} - Existing token has refresh_token: {bool(token.refresh_token)}")
+            if token.refresh_token:
+                _LOGGER.debug(f"{DOMAIN} - rmtoken length: {len(token.refresh_token)}")
+        
         url = self.API_URL + "prof/authUser"
         data = {
             "deviceKey": self.device_id,
@@ -382,41 +384,75 @@ class KiaUvoApiUSA(ApiImpl):
         if token and getattr(token, "device_id", None):
             self.device_id = token.device_id
             data["deviceKey"] = self.device_id
+            _LOGGER.debug(f"{DOMAIN} - Using stored device_id: {self.device_id}")
+        
         if otp_handler is not None:
             self._otp_handler = otp_handler
+        
         headers = self.api_headers()
+        rmtoken_attempted = False
+        rmtoken_used_successfully = False
+        
+        # First try with rmtoken if available
         if token and token.refresh_token:
-            _LOGGER.debug(f"{DOMAIN} - Attempting login with stored rmtoken")
+            _LOGGER.info(f"{DOMAIN} - Attempting login with stored rmtoken")
             headers["rmtoken"] = token.refresh_token
+            rmtoken_attempted = True
+        
         response = self.session.post(url, json=data, headers=headers)
-        _LOGGER.debug(f"{DOMAIN} - Sign In Response {response.text}")
+        _LOGGER.debug(f"{DOMAIN} - Initial Sign In Response {response.text}")
+        _LOGGER.debug(f"{DOMAIN} - Response headers: {dict(response.headers)}")
         response_json = response.json()
         
         # Check for errors and retry without rmtoken if needed
         if response_json.get("status", {}).get("statusCode") != 0:
             error_code = response_json.get("status", {}).get("errorCode")
-            if error_code == 9789 and token and token.refresh_token:
-                _LOGGER.info(f"{DOMAIN} - Retrying login without rmtoken")
+            error_msg = response_json.get("status", {}).get("errorMessage", "Unknown")
+            _LOGGER.warning(f"{DOMAIN} - Login error: {error_code} - {error_msg}")
+            
+            # If error and we tried with rmtoken, retry without it
+            if rmtoken_attempted and error_code in [1003, 9789]:
+                _LOGGER.info(f"{DOMAIN} - Stored rmtoken failed (error {error_code}), retrying without it")
                 headers_retry = self.api_headers()
                 response = self.session.post(url, json=data, headers=headers_retry)
                 _LOGGER.debug(f"{DOMAIN} - Retry Sign In Response {response.text}")
+                _LOGGER.debug(f"{DOMAIN} - Retry response headers: {dict(response.headers)}")
                 response_json = response.json()
+                # Clear the flag since we succeeded without rmtoken
+                rmtoken_attempted = False
+            else:
+                _LOGGER.error(f"{DOMAIN} - Login failed with error {error_code}: {error_msg}")
         
         session_id = response.headers.get("sid")
         if session_id:
-            _LOGGER.debug(f"got session id {session_id}")
+            _LOGGER.info(f"{DOMAIN} - Login successful, got session id: {session_id[:10]}...")
             valid_until = dt.datetime.now(dt.timezone.utc) + LOGIN_TOKEN_LIFETIME
-            existing_rmtoken = token.refresh_token if token else None
+            
+            # Check if we got a new rmtoken in the response
+            new_rmtoken = response.headers.get("rmtoken")
+            if new_rmtoken:
+                _LOGGER.info(f"{DOMAIN} - Received new rmtoken from server: {new_rmtoken[:10]}...")
+                final_rmtoken = new_rmtoken
+            elif token and rmtoken_attempted:
+                # We successfully used the existing rmtoken
+                _LOGGER.info(f"{DOMAIN} - Successfully authenticated with existing rmtoken")
+                final_rmtoken = token.refresh_token
+            else:
+                # No rmtoken available
+                _LOGGER.warning(f"{DOMAIN} - No rmtoken available - may require OTP on next login")
+                final_rmtoken = None
+            
             return Token(
                 username=username,
                 password=password,
                 access_token=session_id,
-                refresh_token=existing_rmtoken,
+                refresh_token=final_rmtoken,
                 valid_until=valid_until,
                 device_id=self.device_id,
                 pin=pin,
             )
         
+        # OTP handling - rest of the code stays the same
         if "payload" in response_json and "otpKey" in response_json["payload"]:
             payload = response_json["payload"]
             if payload.get("rmTokenExpired"):
@@ -469,8 +505,8 @@ class KiaUvoApiUSA(ApiImpl):
             
             sid, rmtoken = self._verify_otp(otp_key, otp_code, xid)
             final_sid = self._complete_login_with_otp(username, password, sid, rmtoken)
-            _LOGGER.debug(f"got final session id {final_sid}")
-            _LOGGER.info(f"{DOMAIN} - Storing rmtoken for future logins")
+            _LOGGER.info(f"{DOMAIN} - OTP login successful, got session id: {final_sid[:10]}...")
+            _LOGGER.info(f"{DOMAIN} - Storing new rmtoken from OTP flow: {rmtoken[:10]}...")
             valid_until = dt.datetime.now(dt.timezone.utc) + LOGIN_TOKEN_LIFETIME
             return Token(
                 username=username,
@@ -482,6 +518,7 @@ class KiaUvoApiUSA(ApiImpl):
                 pin=pin,
             )
         
+        _LOGGER.error(f"{DOMAIN} - Login failed - no session ID or OTP flow. Response: {response.text}")
         raise AuthenticationError(f"{DOMAIN} - Login failed. Response: {response.text}")
 
     def get_vehicles(self, token: Token) -> list[Vehicle]:
@@ -491,9 +528,27 @@ class KiaUvoApiUSA(ApiImpl):
         headers["sid"] = token.access_token
         response = self.session.get(url, headers=headers)
         _LOGGER.debug(f"{DOMAIN} - Get Vehicles Response {response.text}")
-        response = response.json()
+        response_json = response.json()
+        
+        # Check for API errors
+        if response_json.get("status", {}).get("statusCode") != 0:
+            error_code = response_json.get("status", {}).get("errorCode")
+            error_msg = response_json.get("status", {}).get("errorMessage", "Unknown error")
+            _LOGGER.error(f"{DOMAIN} - Get Vehicles failed: {error_code} - {error_msg}")
+            
+            # Session invalid errors should trigger reauth
+            if error_code in [1003, 1005]:
+                raise AuthError(f"Session invalid: {error_msg}")
+            else:
+                raise RequestException(f"Get Vehicles failed: {error_msg}")
+        
+        # Check for payload
+        if "payload" not in response_json or "vehicleSummary" not in response_json["payload"]:
+            _LOGGER.error(f"{DOMAIN} - Get Vehicles response missing payload or vehicleSummary")
+            raise RequestException("Invalid response structure from API")
+        
         result = []
-        for entry in response["payload"]["vehicleSummary"]:
+        for entry in response_json["payload"]["vehicleSummary"]:
             vehicle: Vehicle = Vehicle(
                 id=entry["vehicleIdentifier"],
                 name=entry["nickName"],
@@ -511,17 +566,39 @@ class KiaUvoApiUSA(ApiImpl):
         Refresh the vehicle data provided in get_vehicles.
         Required for Kia USA as key is session specific
         """
+        _LOGGER.debug(f"{DOMAIN} - refresh_vehicles() called")
+        _LOGGER.debug(f"{DOMAIN} - Token access_token: {token.access_token[:10] if token.access_token else 'None'}...")
+        
         url = self.API_URL + "ownr/gvl"
         headers = self.api_headers()
         headers["sid"] = token.access_token
+        
+        _LOGGER.debug(f"{DOMAIN} - Calling get vehicles with sid: {token.access_token[:10]}...")
         response = self.session.get(url, headers=headers)
         _LOGGER.debug(f"{DOMAIN} - Get Vehicles Response {response.text}")
         _LOGGER.debug(f"{DOMAIN} - Vehicles Type Passed in: {type(vehicles)}")
-        _LOGGER.debug(f"{DOMAIN} - Vehicles Passed in: {vehicles}")
 
-        response = response.json()
+        response_json = response.json()
+        
+        # Check for API errors
+        if response_json.get("status", {}).get("statusCode") != 0:
+            error_code = response_json.get("status", {}).get("errorCode")
+            error_msg = response_json.get("status", {}).get("errorMessage", "Unknown error")
+            _LOGGER.error(f"{DOMAIN} - refresh_vehicles failed: {error_code} - {error_msg}")
+            
+            # Session invalid errors should trigger reauth
+            if error_code in [1003, 1005]:
+                raise AuthError(f"Session invalid in refresh_vehicles: {error_msg}")
+            else:
+                raise RequestException(f"refresh_vehicles failed: {error_msg}")
+        
+        # Check for payload
+        if "payload" not in response_json or "vehicleSummary" not in response_json["payload"]:
+            _LOGGER.error(f"{DOMAIN} - refresh_vehicles response missing payload or vehicleSummary")
+            raise RequestException("Invalid response structure from API")
+        
         if isinstance(vehicles, dict):
-            for entry in response["payload"]["vehicleSummary"]:
+            for entry in response_json["payload"]["vehicleSummary"]:
                 vid = entry.get("vehicleIdentifier")
                 if vid is None:
                     continue
@@ -539,15 +616,17 @@ class KiaUvoApiUSA(ApiImpl):
                         timezone=self.data_timezone,
                     )
                     vehicles[vid] = vehicle
+            _LOGGER.debug(f"{DOMAIN} - Successfully refreshed {len(vehicles)} vehicles")
             return vehicles
         else:
             # For readability work with vehicle without s
             vehicle = vehicles
-            for entry in response["payload"]["vehicleSummary"]:
+            for entry in response_json["payload"]["vehicleSummary"]:
                 if vehicle.id == entry["vehicleIdentifier"]:
                     vehicle.name = entry["nickName"]
                     vehicle.model = entry["modelName"]
                     vehicle.key = entry["vehicleKey"]
+                    _LOGGER.debug(f"{DOMAIN} - Successfully refreshed vehicle {vehicle.id}")
                     return vehicle
 
     def update_vehicle_with_cached_state(self, token: Token, vehicle: Vehicle) -> None:
