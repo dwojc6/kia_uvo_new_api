@@ -162,35 +162,86 @@ class VehicleManager:
             _LOGGER.debug(f"{DOMAIN} - Vehicle Disabled, skipping.")
 
     def check_and_refresh_token(self) -> bool:
+        _LOGGER.debug(f"{DOMAIN} - check_and_refresh_token() called")
+        
         if self.token is None:
+            _LOGGER.info(f"{DOMAIN} - No token exists, calling initialize()")
             self.initialize()
-        elif not self.vehicles_valid:
-            self.initialize_vehicles()
+            return True
+        
+        # Check token validity BEFORE checking vehicles_valid
         now_utc = dt.datetime.now(dt.timezone.utc)
         grace_period = timedelta(seconds=10)
         min_supported_datetime = dt.datetime.min.replace(tzinfo=dt.timezone.utc)
         valid_until = self.token.valid_until
         token_expired = False
+        
+        _LOGGER.debug(f"{DOMAIN} - Current time: {now_utc}")
+        _LOGGER.debug(f"{DOMAIN} - Token valid_until: {valid_until}")
+        
         if not isinstance(valid_until, dt.datetime):
+            _LOGGER.warning(f"{DOMAIN} - Token valid_until is not a datetime: {type(valid_until)}")
             token_expired = True
         else:
             if valid_until.tzinfo is None:
+                _LOGGER.debug(f"{DOMAIN} - Adding timezone to valid_until")
                 valid_until = valid_until.replace(tzinfo=dt.timezone.utc)
             if valid_until <= min_supported_datetime + grace_period:
+                _LOGGER.warning(f"{DOMAIN} - Token valid_until is too old")
                 token_expired = True
             else:
                 token_expired = valid_until - grace_period <= now_utc
-        if token_expired or self.api.test_token(self.token) is False:
-            _LOGGER.debug(f"{DOMAIN} - Refresh token expired")
-            self.token: Token = self.api.login(
+                _LOGGER.debug(f"{DOMAIN} - Token expired by time check: {token_expired}")
+        
+        # Also test if the token actually works (but only if not obviously expired by time)
+        token_test_result = True
+        if not token_expired:
+            token_test_result = self.api.test_token(self.token)
+            _LOGGER.debug(f"{DOMAIN} - Token test result: {token_test_result}")
+        
+        # If token is invalid, refresh it BEFORE checking vehicles
+        if token_expired or token_test_result is False:
+            _LOGGER.info(f"{DOMAIN} - Token needs refresh (expired={token_expired}, test_failed={not token_test_result})")
+            _LOGGER.info(f"{DOMAIN} - Current token access_token: {self.token.access_token[:10] if self.token.access_token else 'None'}...")
+            _LOGGER.info(f"{DOMAIN} - Current token has refresh_token: {bool(self.token.refresh_token)}")
+            
+            # Call login to get new token
+            new_token = self.api.login(
                 self.username,
                 self.password,
                 self.token,
                 otp_handler=self.otp_handler,
                 pin=self.pin,
             )
+            
+            _LOGGER.info(f"{DOMAIN} - Login returned new token")
+            _LOGGER.info(f"{DOMAIN} - New token access_token: {new_token.access_token[:10] if new_token.access_token else 'None'}...")
+            _LOGGER.info(f"{DOMAIN} - New token has refresh_token: {bool(new_token.refresh_token)}")
+            _LOGGER.info(f"{DOMAIN} - New token device_id: {getattr(new_token, 'device_id', None)}")
+            
+            # Update self.token with the new token's values
+            _LOGGER.debug(f"{DOMAIN} - Updating existing token object with new values")
+            self.token.access_token = new_token.access_token
+            self.token.refresh_token = new_token.refresh_token
+            self.token.valid_until = new_token.valid_until
+            self.token.device_id = getattr(new_token, "device_id", None)
+            
+            _LOGGER.info(f"{DOMAIN} - Token updated. Calling refresh_vehicles()")
+            _LOGGER.debug(f"{DOMAIN} - About to call refresh_vehicles with token sid: {self.token.access_token[:10]}...")
+            
+            # Now refresh_vehicles will use the new token
             self.vehicles = self.api.refresh_vehicles(self.token, self.vehicles)
+            self.vehicles_valid = True
+            _LOGGER.info(f"{DOMAIN} - refresh_vehicles completed successfully")
             return True
+        
+        # Token is valid, but check if we need to initialize vehicles
+        if not self.vehicles_valid:
+            _LOGGER.info(f"{DOMAIN} - Token valid but vehicles not initialized, calling initialize_vehicles()")
+            self.initialize_vehicles()
+            return False
+        
+        _LOGGER.debug(f"{DOMAIN} - Token is still valid, no refresh needed")
         return False
 
     def start_climate(self, vehicle_id: str, options: ClimateRequestOptions) -> str:
