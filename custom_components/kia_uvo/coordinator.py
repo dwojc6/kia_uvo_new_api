@@ -110,19 +110,30 @@ class HyundaiKiaConnectDataUpdateCoordinator(DataUpdateCoordinator):
         stored_token_data = self.config_entry.data.get("token_data")
         if stored_token_data:
             try:
+                import datetime as dt
+                from dateutil import parser
+                
+                # Parse valid_until if it's a string
+                valid_until = stored_token_data.get("valid_until")
+                if isinstance(valid_until, str):
+                    valid_until = parser.parse(valid_until)
+                
+                # IMPORTANT: Don't load access_token - session IDs expire quickly
+                # Only load the refresh_token (rmtoken) which lasts 23 hours
+                # Set access_token to None and valid_until to expired so login is triggered
                 self.vehicle_manager.token = Token(
                     username=stored_token_data.get("username"),
                     password=stored_token_data.get("password"),
-                    access_token=stored_token_data.get("access_token"),
+                    access_token=None,  # Force fresh login
                     refresh_token=stored_token_data.get("refresh_token"),
-                    valid_until=stored_token_data.get("valid_until"),
+                    valid_until=dt.datetime.min.replace(tzinfo=dt.timezone.utc),  # Expired
                     device_id=stored_token_data.get("device_id"),
                 )
-                _LOGGER.info(f"{DOMAIN} - Loaded stored token with rmtoken")
+                _LOGGER.info(f"{DOMAIN} - Loaded stored rmtoken, will perform fresh login")
             except Exception as e:
                 _LOGGER.warning(f"{DOMAIN} - Failed to load stored token: {e}")
 
-    def _save_token(self):
+    async def _async_save_token(self):
         """Save the current token to config entry data."""
         if self.vehicle_manager.token:
             token_data = {
@@ -130,7 +141,7 @@ class HyundaiKiaConnectDataUpdateCoordinator(DataUpdateCoordinator):
                 "password": self.vehicle_manager.token.password,
                 "access_token": self.vehicle_manager.token.access_token,
                 "refresh_token": self.vehicle_manager.token.refresh_token,
-                "valid_until": self.vehicle_manager.token.valid_until,
+                "valid_until": self.vehicle_manager.token.valid_until.isoformat() if hasattr(self.vehicle_manager.token.valid_until, 'isoformat') else str(self.vehicle_manager.token.valid_until),
                 "device_id": getattr(self.vehicle_manager.token, "device_id", None),
             }
             
@@ -153,8 +164,8 @@ class HyundaiKiaConnectDataUpdateCoordinator(DataUpdateCoordinator):
         try:
             token_refreshed = await self.async_check_and_refresh_token()
             if token_refreshed:
-                # Save the refreshed token
-                await self.hass.async_add_executor_job(self._save_token)
+                # Save the refreshed token (now async)
+                await self._async_save_token()
         except AuthenticationError as auth_error:
             _LOGGER.error(f"Authentication failed: {auth_error}")
             raise ConfigEntryAuthFailed(
@@ -218,7 +229,7 @@ class HyundaiKiaConnectDataUpdateCoordinator(DataUpdateCoordinator):
         """Update vehicle data."""
         token_refreshed = await self.async_check_and_refresh_token()
         if token_refreshed:
-            await self.hass.async_add_executor_job(self._save_token)
+            await self._async_save_token()
         await self.hass.async_add_executor_job(
             self.vehicle_manager.update_all_vehicles_with_cached_state
         )
@@ -228,7 +239,7 @@ class HyundaiKiaConnectDataUpdateCoordinator(DataUpdateCoordinator):
         """Force refresh vehicle data and update it."""
         token_refreshed = await self.async_check_and_refresh_token()
         if token_refreshed:
-            await self.hass.async_add_executor_job(self._save_token)
+            await self._async_save_token()
         await self.hass.async_add_executor_job(
             self.vehicle_manager.force_refresh_all_vehicles_states
         )
