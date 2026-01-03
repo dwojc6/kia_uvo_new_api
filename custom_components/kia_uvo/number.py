@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Final
 
-from hyundai_kia_connect_api import Vehicle
+from .hyundai_kia_connect_api import Vehicle
 
 from homeassistant.components.number import (
     NumberEntity,
