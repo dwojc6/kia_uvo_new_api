@@ -8,7 +8,7 @@ import logging
 from typing import Final
 
 from homeassistant.const import EntityCategory
-from hyundai_kia_connect_api import Vehicle
+from .hyundai_kia_connect_api import Vehicle
 
 from homeassistant.components.binary_sensor import (
     BinarySensorDeviceClass,
