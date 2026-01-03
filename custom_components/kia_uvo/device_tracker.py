@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 
-from hyundai_kia_connect_api import Vehicle
+from .hyundai_kia_connect_api import Vehicle
 
 from homeassistant.components.device_tracker import SourceType
 from homeassistant.components.device_tracker.config_entry import TrackerEntity
