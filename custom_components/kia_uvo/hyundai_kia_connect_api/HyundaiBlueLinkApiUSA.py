@@ -12,7 +12,7 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.ssl_ import create_urllib3_context
 
-from hyundai_kia_connect_api.exceptions import APIError
+from .exceptions import APIError
 
 from .ApiImpl import ApiImpl, ClimateRequestOptions
 from .const import (
