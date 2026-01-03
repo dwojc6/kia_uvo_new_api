@@ -6,7 +6,7 @@ import logging
 from typing import Final
 from datetime import date
 
-from hyundai_kia_connect_api import Vehicle
+from .hyundai_kia_connect_api import Vehicle
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
