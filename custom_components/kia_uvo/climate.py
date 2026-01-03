@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from time import sleep
 
-from hyundai_kia_connect_api import ClimateRequestOptions, Vehicle, VehicleManager
+from .hyundai_kia_connect_api import ClimateRequestOptions, Vehicle, VehicleManager
 
 from homeassistant.components.climate import ClimateEntity, ClimateEntityDescription
 from homeassistant.components.climate.const import (
