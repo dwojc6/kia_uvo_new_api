@@ -129,11 +129,11 @@
         },
         "heating": {
           "name": "Heating",
-          "description": "Heated features like front/rear windows and side mirrors. Europe uses separate steering wheel setting."
+          "description": "Heated features like front/rear windows and side mirrors."
         },
         "steering_wheel": {
           "name": "Steering Wheel Heat",
-          "description": "Heating level for the steering wheel. Europe only, other regions use a heating setting."
+          "description": "Heating level for the steering wheel."
         },
         "flseat": {
           "name": "Front Left Seat",
